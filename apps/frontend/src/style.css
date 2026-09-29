@@ -154,10 +154,10 @@ button:disabled { cursor: default; }
 .sending-limits label:last-child { gap: 6px; }
 .sending-limits input { width: 67px; height: 37px; padding: 0 9px; border: 1px solid #e0e4e8; border-radius: 9px; outline: 0; background: #fff; color: #78818c; font-size: 14px; }
 .sending-limits input:focus { border-color: #91d4a6; }
-.editor-shell { position: relative; width: 100%; height: min(450px, calc(100vh - 402px)); min-height: 250px; margin-top: 8px; overflow: auto; border-radius: 11px; background: #fafafa; }
-.editor-input { min-height: 100%; padding: 17px 16px; outline: 0; color: #26303b; font-size: 15px; line-height: 1.6; white-space: pre-wrap; }
+.editor-shell { position: relative; width: 100%; height: min(450px, calc(100vh - 402px)); min-height: 250px; margin-top: 8px; display: flex; flex-direction: column; overflow: hidden; border-radius: 11px; background: #fafafa; }
+.editor-input { min-height: 0; flex: 1; overflow-y: auto; padding: 17px 16px; outline: 0; color: #26303b; font-size: 15px; line-height: 1.6; white-space: pre-wrap; }
 .editor-input:empty::before { content: attr(data-placeholder); color: #a4a4a4; pointer-events: none; }
-.editor-toolbar { position: absolute; top: 54px; left: 15px; right: 15px; min-height: 37px; display: flex; align-items: center; gap: 4px; overflow-x: auto; padding: 3px 9px; border-radius: 22px; background: #fff; color: #8b8b8b; }
+.editor-toolbar { position: static; min-height: 37px; display: flex; flex: none; align-items: center; gap: 4px; overflow-x: auto; margin: 10px 15px 0; padding: 3px 9px; border-radius: 22px; background: #fff; color: #8b8b8b; }
 .editor-toolbar button { min-width: 27px; height: 29px; display: grid; flex: none; place-items: center; padding: 0 4px; border: 0; border-radius: 4px; background: transparent; color: #858585; font-family: inherit; font-size: 16px; }
 .editor-toolbar button:hover { background: #f1f4f2; color: #29352e; }
 .editor-toolbar button.is-active { background: #e5f6ec; color: #008b35; box-shadow: inset 0 0 0 1px #a8dfb9; }
