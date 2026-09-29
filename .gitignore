@@ -52,3 +52,4 @@ Thumbs.db
 *.tmp
 *.temp
 *.swp
+git push -u origin main
