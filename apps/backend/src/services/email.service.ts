@@ -1,0 +1,8 @@
+import nodemailer from 'nodemailer';
+import { Client } from '@elastic/elasticsearch';
+import { env } from '../config/env.js';
+import { prisma } from '../db/prisma.js';
+export const elastic=new Client({node:env.ELASTICSEARCH_URL});
+const transport=env.ETHEREAL_USER&&env.ETHEREAL_PASS?nodemailer.createTransport({host:env.SMTP_HOST,port:env.SMTP_PORT,secure:env.SMTP_SECURE==='true',auth:{user:env.ETHEREAL_USER,pass:env.ETHEREAL_PASS}}):null;
+export async function sendThroughEthereal(input:{from:string;to:string;subject:string;text:string;html?:string;attachments?:{filename:string;contentType:string;contentBase64:string}[]}){if(!transport)throw new Error('SMTP is not configured. Add ETHEREAL_USER and ETHEREAL_PASS.');return transport.sendMail({...input,attachments:input.attachments?.map(file=>({filename:file.filename,contentType:file.contentType,content:Buffer.from(file.contentBase64,'base64')}))});}
+export async function indexEmail(email:{id:string;campaignId:string;senderId:string;recipient:string;subject:string;body:string;status:string;scheduledAt:Date;sentAt:Date|null;createdAt:Date}){try{const state=await prisma.email.findUnique({where:{id:email.id},select:{isStarred:true,isArchived:true,sender:{select:{email:true,displayName:true}}}});await elastic.index({index:'emails',id:email.id,refresh:'wait_for',document:{...email,senderEmail:state?.sender.email,senderName:state?.sender.displayName,isStarred:state?.isStarred??false,isArchived:state?.isArchived??false,scheduledAt:email.scheduledAt.toISOString(),sentAt:email.sentAt?.toISOString(),createdAt:email.createdAt.toISOString()}})}catch(error){console.error('Email search indexing failed',error)}}

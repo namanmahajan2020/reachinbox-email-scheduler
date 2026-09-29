@@ -1,0 +1,25 @@
+{
+  "name": "reachinbox-scheduler",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/backend",
+    "apps/frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,worker,web -c blue,green,magenta \"npm:dev:backend\" \"npm:worker\" \"npm:dev:frontend\"",
+    "dev:backend": "npm --workspace apps/backend run dev",
+    "worker": "npm --workspace apps/backend run worker",
+    "dev:frontend": "npm --workspace apps/frontend run dev",
+    "build": "npm run build --workspaces",
+    "test": "npm --workspace apps/backend test",
+    "lint": "npm run lint --workspaces",
+    "typecheck": "npm run typecheck --workspaces",
+    "prisma:migrate": "npm --workspace apps/backend run prisma:migrate",
+    "prisma:generate": "npm --workspace apps/backend run prisma:generate"
+  },
+  "devDependencies": {
+    "@typescript-eslint/parser": "^8.71.0",
+    "concurrently": "^9.1.2"
+  }
+}
