@@ -52,7 +52,9 @@ type EmailCounts = Record<Folder, number>;
 type PageInfo = { currentPage: number; pageSize: number; totalCount: number; totalPages: number; hasNextPage: boolean; hasPreviousPage: boolean };
 const FORMAT_COMMANDS = ['bold', 'italic', 'underline', 'strikeThrough', 'insertOrderedList', 'insertUnorderedList', 'justifyLeft', 'justifyCenter', 'justifyRight'] as const;
 
-const API = 'http://localhost:4000';
+const API = (import.meta.env.VITE_API_URL?.trim() || (import.meta.env.DEV
+  ? 'http://localhost:4000'
+  : 'https://reachinbox-email-scheduler-api-h6ij.onrender.com')).replace(/\/+$/, '');
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API}/api${path}`, {
@@ -160,6 +162,7 @@ export default function App() {
   const [senderOpen, setSenderOpen] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [slackConnected, setSlackConnected] = useState(false);
   const [senders, setSenders] = useState<Sender[]>([]);
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [senderId, setSenderId] = useState('');
@@ -239,6 +242,19 @@ export default function App() {
     } catch { /* Keep the last known counts if the summary endpoint is briefly unavailable. */ }
   }
 
+  async function refreshSlackConnection() {
+    try {
+      const state = await request<{ connected: boolean }>('/slack');
+      setSlackConnected(state.connected);
+      if (new URLSearchParams(window.location.search).get('slack') === 'connected' && state.connected) {
+        notify('Slack connected successfully.');
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    } catch {
+      setSlackConnected(false);
+    }
+  }
+
   async function loadEmails(page = currentPage) {
     const generation = ++listGenerationRef.current;
     setLoading(true);
@@ -281,6 +297,7 @@ export default function App() {
       setSenders(currentSenders);
       setSenderId((current) => current || currentSenders[0]?.id || '');
       void refreshCounts();
+      void refreshSlackConnection();
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : 'Could not load your inbox';
       if (message !== 'Authentication required') setError(message);
@@ -423,6 +440,20 @@ export default function App() {
       void refreshCounts();
     } catch (cause) { notify(cause instanceof Error ? cause.message : 'Email action failed.'); }
     finally { setActionBusy(false); }
+  }
+
+  async function toggleSlackConnection() {
+    if (!slackConnected) {
+      window.location.assign(`${API}/api/slack/connect`);
+      return;
+    }
+    try {
+      await request('/slack', { method: 'DELETE' });
+      setSlackConnected(false);
+      notify('Slack disconnected.');
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : 'Could not disconnect Slack.');
+    }
   }
 
   async function bulkAction(action: 'archive' | 'unarchive' | 'star' | 'unstar' | 'trash' | 'restore' | 'permanent-delete') {
@@ -650,6 +681,8 @@ export default function App() {
           </button>
           <div className={`account-menu ${profileOpen ? 'is-open' : ''}`} aria-hidden={!profileOpen}>
               {!user.hasPassword && <button className="set-password-action" onClick={() => { setProfileOpen(false); setPasswordOpen(true); }}>Set email password</button>}
+              {slackConnected && <div className="slack-connected"><span aria-hidden="true" />Slack connected</div>}
+              <button onClick={() => void toggleSlackConnection()}>{slackConnected ? 'Disconnect Slack' : 'Connect Slack'}</button>
               <button onClick={() => void signOut()}><LogOut size={14} />Sign out</button>
           </div>
           <button className="compose-sidebar-button" onClick={openCompose}>Compose</button>

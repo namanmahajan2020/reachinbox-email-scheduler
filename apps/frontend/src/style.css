@@ -68,6 +68,8 @@ button:disabled { cursor: default; }
 .account-menu button { width: 100%; min-height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 0; border-radius: 6px; background: rgb(255 255 255 / 52%); color: #4c5663; font-size: 12px; text-align: left; }
 .account-menu button:hover { background: #f7f9f8; }
 .account-menu button:last-child:hover { background: #fff0ef; color: #b42318; }
+.slack-connected { display: flex; align-items: center; gap: 8px; padding: 8px 10px 5px; color: #257445; font-size: 11px; }
+.slack-connected > span { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
 .compose-sidebar-button { width: 100%; height: 37px; margin-top: 10px; border: 1px solid var(--green); border-radius: 20px; background: #fff; color: var(--green); font-size: 14px; font-weight: 500; }
 .compose-sidebar-button:hover { background: #f2fbf5; }
 .mail-nav { margin-top: 24px; }

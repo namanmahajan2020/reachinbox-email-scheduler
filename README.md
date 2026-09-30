@@ -268,6 +268,14 @@ Values below match `.env.example` and the backend's runtime validation. Do not c
 | `DEFAULT_HOURLY_LIMIT` | `100` | Positive hourly limit used when a campaign omits one. |
 | `COOKIE_SECURE` | `false` | Set to `true` when serving over HTTPS. |
 
+### Vercel frontend and Render API
+
+The frontend reads the backend origin from `VITE_API_URL`, then appends `/api` to API, OAuth, and attachment paths. Local development defaults to `http://localhost:4000`; the production fallback is the ReachInbox Render API. Set `VITE_API_URL=https://reachinbox-email-scheduler-api-h6ij.onrender.com` in the Vercel project's Production environment. Do not include `/api` or a trailing path in this value.
+
+For cross-origin session authentication, configure Render's `FRONTEND_URL` to the exact Vercel origin, set `COOKIE_SECURE=true`, and register the Render callback `https://reachinbox-email-scheduler-api-h6ij.onrender.com/api/auth/google/callback` with Google. With secure cookies enabled, the API uses `SameSite=None; Secure` so credentialed browser requests from Vercel can send the session cookie. The frontend sends fetch requests with `credentials: 'include'`.
+
+For a Vercel project rooted at `apps/frontend`, use the Vite framework preset, `npm run build` as the build command, and `dist` as the output directory. Leave dependency installation on Vercel's default behavior so the repository's npm workspaces and root lockfile are honored.
+
 Configure Google's authorized redirect URI to match `GOOGLE_CALLBACK_URL`. Configure the Slack app redirect URL to match `SLACK_CALLBACK_URL`; its OAuth flow requests `chat:write` and `im:write`.
 
 ## Development checks
