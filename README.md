@@ -12,8 +12,11 @@
 - Coordinate spacing and hourly limits across worker processes with an atomic Redis Lua operation; move rate-limited jobs back into the delayed state.
 - Send text and HTML email with up to five attachments (5 MB total per campaign) through configured SMTP, with Ethereal as the sample provider.
 - Authenticate with Google OAuth or create an account and sign in with email and password.
-- Browse scheduled, processing, sent, and failed emails; view email details; star, archive, unarchive, and delete emails.
-- Search by subject, body, recipient, or sender using Elasticsearch with a PostgreSQL fallback.
+- Browse scheduled, processing, sent, and failed emails with database-backed pages of 50; view email details; star, archive, unarchive, and move emails to Trash.
+- Search by subject, body, recipient, or sender using Elasticsearch with PostgreSQL-backed ownership, filters, and fallback matching.
+- Use dedicated Starred, Archived, and Trash folders, with single and bulk archive, star, restore, and trash actions.
+- Permanently delete trashed emails with confirmation; attachments are campaign-scoped and are cleaned up when the campaign has no remaining emails.
+- Filter scheduled and sent mail by local-time date ranges while preserving search and folder filters across pages.
 - Connect Slack through OAuth for direct-message rate-limit alerts; the stored bot token is encrypted in PostgreSQL.
 - Inspect queue states in the authenticated Bull Board dashboard.
 - Run the local stack with Docker Compose: PostgreSQL, Redis, and Elasticsearch use named data volumes.
@@ -53,7 +56,7 @@ PostgreSQL stores users, senders, campaigns, email state, attachments, Slack con
 6. A worker claims eligible email records in PostgreSQL. Redis atomically checks the rolling hourly limit and minimum spacing before delivery.
 7. A rate-limited job updates its scheduled time and moves itself into BullMQ's delayed state. Slack notification is attempted when the sender's hourly limit is reached.
 8. The worker sends through the configured SMTP transport, saves the resulting status in PostgreSQL, and attempts to index the result in Elasticsearch.
-9. The dashboard polls the inbox every three seconds when the inbox is visible and idle; search results are requested when the user submits a query.
+9. The dashboard requests 50 matching emails from the API at a time. Search, folder, and date filters are applied in the database before pagination. It polls the current page every three seconds when the inbox is visible and idle.
 
 ## Restart behavior and delivery guarantees
 
@@ -75,7 +78,7 @@ When the rolling cap is reached, the active job is rescheduled for the next avai
 
 On successful delivery and final worker failure, the worker attempts to index the email in the Elasticsearch `emails` index. Documents include email, campaign, and sender identifiers; sender name/address; recipient; subject; body; status; starred/archive state; and schedule, sent, and creation timestamps. Indexing uses `refresh: wait_for` when it succeeds. Indexing errors are logged without undoing email delivery.
 
-The authenticated `GET /api/search?q=...` endpoint searches recipient, sender address/name, subject, and body. It supplements Elasticsearch hits with PostgreSQL substring matches, and falls back to PostgreSQL if Elasticsearch is unavailable. As a result, searches can still find database records that have not yet been indexed. The dashboard applies the active inbox tab and starred/archive filter to the returned results.
+The authenticated `GET /api/search?q=...` endpoint searches recipient, sender address/name, subject, and body. It combines Elasticsearch hits with PostgreSQL substring matches, and falls back to PostgreSQL if Elasticsearch is unavailable. Results are scoped to the signed-in user's records, exclude Trash except when explicitly viewing Trash, and support the same 50-row pagination and date/folder filters as the inbox.
 
 ## Authentication and integrations
 
@@ -97,7 +100,19 @@ The worker sends through the SMTP host and credentials in `.env`. Ethereal is a 
 
 ## Dashboard
 
-The Vite/React application provides sign-in, sender setup, campaign composition, rich-text/HTML message content, attachments, scheduled and sent views, email details, search, filters, star/unstar, and archive/unarchive actions. The inbox refreshes in the background every three seconds when idle; polling pauses while composing, viewing an email, or searching. File attachments are stored with the campaign and shown on each email in that campaign.
+The Vite/React application provides sign-in, sender setup, campaign composition, rich-text/HTML message content, attachments, scheduled and sent views, email details, search, date filters, star/unstar, and archive/unarchive actions. The inbox refreshes the current page every three seconds when idle; polling pauses while composing or viewing an email. Selection is limited to the visible page; bulk actions use one authenticated API request. File attachments are stored with the campaign and shown on each email in that campaign. Image and document previews appear immediately in compose; object URLs are revoked when previews are replaced or removed.
+
+## Trash and recovery
+
+Deleting an email moves it to Trash by setting `Email.deletedAt`; normal inbox, search, Starred, and Archived views exclude those records. Restore clears `deletedAt` and preserves the email's existing star/archive state. Permanent deletion is only available in Trash and removes the email in a transaction. If that was the campaign's last email, the now-unused campaign and its campaign-scoped attachment records are removed as well.
+
+## Starred and archived
+
+Star state (`isStarred`) and archive state (`isArchived`) are persisted per email in PostgreSQL. Starred and Archived are dedicated folders, retain search/pagination support, and can be unstarred/unarchived or moved to Trash. Archived emails do not appear in the regular Scheduled or Sent folders.
+
+## Date filters
+
+Date boundaries are calculated in the browser's local timezone and sent to the API as ISO timestamps. Scheduled mail supports Today, Tomorrow, Next 24 hours, This week, and Last 7 days. Sent mail supports Today, Yesterday, the last 7/30 days, and recent hour ranges. The backend filters by `scheduledAt` for Scheduled, `sentAt` for Sent, and creation time for other folders.
 
 ## API overview
 
@@ -114,14 +129,32 @@ The API is served under `/api` on port `4000` by default. Protected routes requi
 | `GET` | `/api/auth/google/callback` | Complete Google OAuth |
 | `GET`, `POST` | `/api/senders` | List or add/update a sender |
 | `POST` | `/api/campaigns` | Create a campaign and enqueue its emails |
-| `GET` | `/api/emails` | List emails; accepts `view=all\|starred\|archived` and an optional status |
+| `GET` | `/api/emails` | List emails; accepts `view`, `page`, `limit` (max 50), status, `dateFrom`, and `dateTo`; page/limit returns pagination metadata |
 | `PATCH` | `/api/emails/:id/star` | Persist star state |
 | `PATCH` | `/api/emails/:id/archive` | Archive or unarchive an email |
+| `PATCH` | `/api/emails/:id/trash` | Move an email to Trash |
+| `PATCH` | `/api/emails/:id/restore` | Restore an email from Trash |
+| `DELETE` | `/api/emails/:id/permanent` | Permanently delete an email already in Trash |
+| `PATCH` | `/api/emails/bulk` | Apply one archive/star/trash/restore action to up to 50 owned emails |
 | `GET` | `/api/emails/:id/attachments/:attachmentId` | Read an authorized attachment |
 | `GET` | `/api/search?q=...` | Search email content |
 | `GET`, `DELETE` | `/api/slack` | Read or disconnect Slack state |
 | `GET` | `/api/queue` | Read queue counts by state |
 | `GET` | `/admin/queues` | Authenticated Bull Board UI |
+
+When `page` or `limit` is supplied, list and search responses use this shape (legacy requests without pagination parameters still return an array):
+
+```json
+{
+  "emails": [],
+  "currentPage": 1,
+  "pageSize": 50,
+  "totalCount": 137,
+  "totalPages": 3,
+  "hasNextPage": true,
+  "hasPreviousPage": false
+}
+```
 
 ## Project structure
 
@@ -255,4 +288,3 @@ npm run build
 - Search has a database fallback, but Elasticsearch is updated as worker jobs complete rather than when an email is first scheduled.
 - Slack alerts are best effort. Missing configuration, unavailable Slack, or an API rejection is logged and does not cancel rescheduling.
 - SMTP cannot guarantee exactly-once delivery across a process failure between provider acceptance and the PostgreSQL status update.
-

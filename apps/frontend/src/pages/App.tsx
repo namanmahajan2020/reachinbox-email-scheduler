@@ -20,6 +20,9 @@ import {
   Underline,
   Upload,
   X,
+  ChevronLeft,
+  ChevronRight,
+  RotateCcw,
 } from 'lucide-react';
 import { parseLeads } from '../utils/leads';
 
@@ -36,11 +39,13 @@ type Email = {
   campaign?: { attachments?: { id: string; filename: string; contentType: string; size?: number }[] };
   isStarred?: boolean;
   isArchived?: boolean;
+  deletedAt?: string | null;
   htmlBody?: string | null;
 };
 type User = { name: string; email: string; avatarUrl?: string | null; hasPassword?: boolean };
 type Sender = { id: string; email: string; displayName: string };
 type Tab = 'scheduled' | 'sent';
+type PageInfo = { currentPage: number; pageSize: number; totalCount: number; totalPages: number; hasNextPage: boolean; hasPreviousPage: boolean };
 const FORMAT_COMMANDS = ['bold', 'italic', 'underline', 'strikeThrough', 'insertOrderedList', 'insertUnorderedList', 'justifyLeft', 'justifyCenter', 'justifyRight'] as const;
 
 const API = 'http://localhost:4000';
@@ -105,6 +110,19 @@ function formatFileSize(size?: number) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function filterDateRange(filter: string, tab: Tab, now = new Date()): { from?: string; to?: string } {
+  const startOfDay = (date: Date) => { const value = new Date(date); value.setHours(0, 0, 0, 0); return value; };
+  const endOfDay = (date: Date) => { const value = startOfDay(date); value.setDate(value.getDate() + 1); return value; };
+  if (filter === 'today') return { from: startOfDay(now).toISOString(), to: endOfDay(now).toISOString() };
+  if (filter === 'yesterday') { const day = new Date(now); day.setDate(day.getDate() - 1); return { from: startOfDay(day).toISOString(), to: endOfDay(day).toISOString() }; }
+  if (filter === '7d' || filter === '30d') { const from = new Date(now); from.setDate(from.getDate() - (filter === '7d' ? 7 : 30)); return { from: from.toISOString() }; }
+  if (filter.endsWith('h')) { const from = new Date(now); from.setHours(from.getHours() - Number(filter.slice(0, -1))); return { from: from.toISOString() }; }
+  if (filter === 'tomorrow') { const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1); return { from: startOfDay(tomorrow).toISOString(), to: endOfDay(tomorrow).toISOString() }; }
+  if (filter === '24h') return { from: now.toISOString(), to: new Date(now.getTime() + 24 * 60 * 60_000).toISOString() };
+  if (filter === 'week') { const from = startOfDay(now); const day = (from.getDay() + 6) % 7; from.setDate(from.getDate() - day); const to = new Date(from); to.setDate(to.getDate() + 7); return tab === 'scheduled' ? { from: now.toISOString(), to: to.toISOString() } : { from: from.toISOString(), to: to.toISOString() }; }
+  return {};
+}
+
 function GoogleMark() {
   return (
     <svg aria-hidden="true" className="google-mark" viewBox="0 0 48 48">
@@ -126,14 +144,17 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [results, setResults] = useState<Email[] | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
-  const [emailFilter, setEmailFilter] = useState<'all' | 'starred' | 'archived'>('all');
+  const [emailFilter, setEmailFilter] = useState<'all' | 'starred' | 'archived' | 'trash'>('all');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageInfo, setPageInfo] = useState<PageInfo>({ currentPage: 1, pageSize: 50, totalCount: 0, totalPages: 0, hasNextPage: false, hasPreviousPage: false });
+  const [dateFilter, setDateFilter] = useState('all');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [composeOpen, setComposeOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [senderOpen, setSenderOpen] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [senders, setSenders] = useState<Sender[]>([]);
-  const [slack, setSlack] = useState(false);
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [senderId, setSenderId] = useState('');
   const [recipientDraft, setRecipientDraft] = useState('');
@@ -148,6 +169,8 @@ export default function App() {
   const [signUp, setSignUp] = useState(false);
   const [toast, setToast] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
+  const attachmentPreviews = useMemo(() => attachments.map((file) => ({ file, url: file.type.startsWith('image/') ? URL.createObjectURL(file) : '' })), [attachments]);
+  useEffect(() => () => attachmentPreviews.forEach((preview) => { if (preview.url) URL.revokeObjectURL(preview.url); }), [attachmentPreviews]);
   const [actionBusy, setActionBusy] = useState(false);
   const [senderBusy, setSenderBusy] = useState(false);
   const [passwordBusy, setPasswordBusy] = useState(false);
@@ -188,6 +211,26 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
+  async function loadEmails(page = currentPage) {
+    setLoading(true);
+    setError('');
+    const view = emailFilter === 'all' ? tab : emailFilter;
+    const range = filterDateRange(dateFilter, tab);
+    const params = new URLSearchParams({ view, page: String(page), limit: '50' });
+    if (search.trim()) params.set('q', search.trim());
+    if (range.from) params.set('dateFrom', range.from);
+    if (range.to) params.set('dateTo', range.to);
+    try {
+      const path = search.trim() ? `/search?${params}` : `/emails?${params}`;
+      const response = await request<{ emails: Email[] } & PageInfo>(path);
+      setEmails(response.emails);
+      setPageInfo(response);
+      setCurrentPage(response.currentPage);
+      setSelectedIds([]);
+    } catch (cause) { const message = cause instanceof Error ? cause.message : 'Could not load emails'; if (message === 'Authentication required') setUser(null); else setError(message); }
+    finally { setLoading(false); }
+  }
+
   async function load() {
     setLoading(true);
     setError('');
@@ -198,15 +241,14 @@ export default function App() {
         setEmails([]);
         return;
       }
-      const [currentEmails, currentSenders, slackState] = await Promise.all([
-        request<Email[]>('/emails?view=all'),
+      const [currentEmails, currentSenders] = await Promise.all([
+        request<{ emails: Email[] } & PageInfo>(`/emails?view=${emailFilter === 'all' ? tab : emailFilter}&page=${currentPage}&limit=50`),
         request<Sender[]>('/senders'),
-        request<{ connected: boolean }>('/slack'),
       ]);
       setUser(session.user);
-      setEmails(currentEmails);
+      setEmails(currentEmails.emails);
+      setPageInfo(currentEmails);
       setSenders(currentSenders);
-      setSlack(slackState.connected);
       setSenderId((current) => current || currentSenders[0]?.id || '');
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : 'Could not load your inbox';
@@ -222,14 +264,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (user) void loadEmails(currentPage);
+  }, [user, currentPage, tab, emailFilter, dateFilter, search]);
+
+  useEffect(() => {
     if (!user || composeOpen || selectedEmail || search.trim()) return;
     let active = true;
     const timer = window.setInterval(async () => {
       if (pollingRef.current) return;
       pollingRef.current = true;
       try {
-        const latest = await request<Email[]>('/emails?view=all');
-        if (active) setEmails(latest);
+        const view = emailFilter === 'all' ? tab : emailFilter;
+        const query = new URLSearchParams({ view, page: String(currentPage), limit: '50' });
+        if (search.trim()) query.set('q', search.trim());
+        const dateRange = filterDateRange(dateFilter, tab);
+        if (dateRange.from) query.set('dateFrom', dateRange.from);
+        if (dateRange.to) query.set('dateTo', dateRange.to);
+        const latest = await request<{ emails: Email[] } & PageInfo>(`${search.trim() ? '/search' : '/emails'}?${query}`);
+        if (active) { setEmails(latest.emails); setPageInfo(latest); }
         pollFailedRef.current = false;
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : '';
@@ -239,7 +291,7 @@ export default function App() {
       finally { pollingRef.current = false; }
     }, 3000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [user, composeOpen, selectedEmail, search]);
+  }, [user, composeOpen, selectedEmail, search, currentPage, tab, emailFilter, dateFilter]);
 
   useEffect(() => {
     if (!profileOpen && !filterOpen && !scheduleOpen && !senderOpen && !passwordOpen) return;
@@ -298,7 +350,7 @@ export default function App() {
     finally { setPasswordBusy(false); }
   }
 
-  async function changeEmail(email: Email, action: 'star' | 'archive' | 'unarchive' | 'delete') {
+  async function changeEmail(email: Email, action: 'star' | 'archive' | 'unarchive' | 'delete' | 'restore' | 'permanent-delete') {
     if (actionBusy) return;
     setActionBusy(true);
     try {
@@ -323,12 +375,35 @@ export default function App() {
         setResults((current) => current?.map((item) => item.id === email.id ? { ...item, isArchived } : item) ?? null);
         setSelectedEmail(null);
         notify(isArchived ? 'Email archived.' : 'Email unarchived.');
+      } else if (action === 'delete') {
+        await request(`/emails/${email.id}/trash`, { method: 'PATCH' });
+        setEmails((current) => current.filter((item) => item.id !== email.id)); setSelectedEmail(null); notify('Email moved to Trash.');
+      } else if (action === 'restore') {
+        await request(`/emails/${email.id}/restore`, { method: 'PATCH' });
+        setEmails((current) => current.filter((item) => item.id !== email.id)); setSelectedEmail(null); notify('Email restored.');
       } else {
-        if (!window.confirm('Delete this email?')) return;
-        await request(`/emails/${email.id}`, { method: 'DELETE' });
-        setEmails((current) => current.filter((item) => item.id !== email.id)); setSelectedEmail(null); notify('Email deleted.');
+        if (!window.confirm('Delete permanently? This email will be permanently removed and cannot be restored.')) return;
+        await request(`/emails/${email.id}/permanent`, { method: 'DELETE' });
+        setEmails((current) => current.filter((item) => item.id !== email.id)); setSelectedEmail(null); notify('Email permanently deleted.');
       }
+      void loadEmails(currentPage);
     } catch (cause) { notify(cause instanceof Error ? cause.message : 'Email action failed.'); }
+    finally { setActionBusy(false); }
+  }
+
+  async function bulkAction(action: 'archive' | 'unarchive' | 'star' | 'unstar' | 'trash' | 'restore' | 'permanent-delete') {
+    if (!selectedIds.length || actionBusy) return;
+    if (action === 'permanent-delete' && !window.confirm(`Delete ${selectedIds.length} email${selectedIds.length === 1 ? '' : 's'} permanently? This cannot be undone.`)) return;
+    setActionBusy(true);
+    try {
+      await request<{ count: number }>('/emails/bulk', { method: 'PATCH', body: JSON.stringify({ ids: selectedIds, action }) });
+      const changedIds = new Set(selectedIds);
+      if (action === 'star' || action === 'unstar') setEmails((current) => current.map((item) => changedIds.has(item.id) ? { ...item, isStarred: action === 'star' } : item));
+      else setEmails((current) => current.filter((item) => !changedIds.has(item.id)));
+      setSelectedIds([]);
+      notify(action === 'trash' ? 'Emails moved to Trash.' : action === 'restore' ? 'Emails restored.' : action === 'permanent-delete' ? 'Emails permanently deleted.' : 'Bulk action complete.');
+      void loadEmails(currentPage);
+    } catch (cause) { notify(cause instanceof Error ? cause.message : 'Bulk action failed.'); }
     finally { setActionBusy(false); }
   }
 
@@ -351,41 +426,22 @@ export default function App() {
     syncFormattingState();
   }
 
-  const visibleEmails = useMemo(() => {
-    const source = results ?? emails;
-    return source.filter((email) => {
-      if (emailFilter === 'archived' ? !email.isArchived : email.isArchived) return false;
-      if (emailFilter === 'starred' && !email.isStarred) return false;
-      if (emailFilter !== 'all') return true;
-      return tab === 'scheduled'
-        ? ['scheduled', 'processing'].includes(email.status)
-        : ['sent', 'failed'].includes(email.status);
-    });
-  }, [emails, results, tab, emailFilter]);
-
-  const scheduledCount = emails.filter((email) => !email.isArchived && ['scheduled', 'processing'].includes(email.status)).length;
-  const sentCount = emails.filter((email) => !email.isArchived && email.status === 'sent').length;
+  const visibleEmails = emails;
+  const scheduledCount = tab === 'scheduled' ? pageInfo.totalCount : undefined;
+  const sentCount = tab === 'sent' ? pageInfo.totalCount : undefined;
 
   async function find() {
     const query = search.trim();
-    const generation = ++searchGenerationRef.current;
-    if (!query) {
-      setResults(null);
-      return;
-    }
-    try {
-      const matches = await request<Email[]>(`/search?q=${encodeURIComponent(query)}`);
-      if (generation === searchGenerationRef.current && query === search.trim()) setResults(matches);
-    } catch (cause) {
-      if (generation === searchGenerationRef.current) setNotice(cause instanceof Error ? cause.message : 'Search failed');
-    }
+    setCurrentPage(1);
+    setResults(null);
+    if (!query) return;
+    await loadEmails(1);
   }
 
   useEffect(() => {
-    if (!user || !search.trim()) return;
-    const timer = window.setTimeout(() => { void find(); }, 300);
-    return () => window.clearTimeout(timer);
-  }, [search, user]);
+    setCurrentPage(1);
+    setSelectedIds([]);
+  }, [tab, emailFilter, dateFilter, search]);
 
   function openCompose() {
     setNotice('');
@@ -504,19 +560,6 @@ export default function App() {
     } finally { setSenderBusy(false); }
   }
 
-  async function toggleSlack() {
-    if (slack) {
-      try {
-        await request('/slack', { method: 'DELETE' });
-        setSlack(false);
-      } catch (cause) {
-        setNotice(cause instanceof Error ? cause.message : 'Could not disconnect Slack');
-      }
-      return;
-    }
-    window.location.assign(`${API}/api/slack/connect`);
-  }
-
   const tomorrowOptions = useMemo(() => {
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
@@ -570,7 +613,6 @@ export default function App() {
           </button>
           {profileOpen && (
             <div className="account-menu">
-              <button onClick={() => void toggleSlack()}>{slack ? 'Disconnect Slack' : 'Connect Slack'}</button>
               {!user.hasPassword && <button className="set-password-action" onClick={() => { setProfileOpen(false); setPasswordOpen(true); }}>Set email password</button>}
               <button onClick={() => void signOut()}><LogOut size={14} />Sign out</button>
             </div>
@@ -584,6 +626,10 @@ export default function App() {
             <button className={`mail-nav-item ${tab === 'sent' ? 'active' : ''}`} onClick={() => { setTab('sent'); setEmailFilter('all'); setSearch(''); setResults(null); setProfileOpen(false); setFilterOpen(false); }}>
               <Send size={17} /><span>Sent</span><small>{sentCount}</small>
             </button>
+            <div className="mail-nav-label">FOLDERS</div>
+            <button className={`mail-nav-item ${emailFilter === 'starred' ? 'active' : ''}`} onClick={() => { setEmailFilter('starred'); setSearch(''); setProfileOpen(false); }}><Star size={17} /><span>Starred</span></button>
+            <button className={`mail-nav-item ${emailFilter === 'archived' ? 'active' : ''}`} onClick={() => { setEmailFilter('archived'); setSearch(''); setProfileOpen(false); }}><Archive size={17} /><span>Archived</span></button>
+            <button className={`mail-nav-item ${emailFilter === 'trash' ? 'active' : ''}`} onClick={() => { setEmailFilter('trash'); setSearch(''); setProfileOpen(false); }}><Trash2 size={17} /><span>Trash</span></button>
           </nav>
         </aside>
       )}
@@ -593,7 +639,7 @@ export default function App() {
           <header className="compose-topbar">
             <button className="compose-back" onClick={closeCompose} aria-label="Back to inbox"><ArrowLeft size={23} /><span>Compose New Email</span></button>
             <div className="compose-actions">
-              <label className="icon-button attachment-trigger" title="Attach files" aria-label="Attach files"><Upload size={19} /><input type="file" multiple onChange={(event) => void handleAttachments(event)} /></label>
+              <label className="icon-button attachment-trigger compose-upload" title={`Attach files${attachments.length ? ` (${attachments.length})` : ''}`} aria-label={`Attach files${attachments.length ? `, ${attachments.length} selected` : ''}`}><Upload size={19} />{attachments.length > 0 && <span className="attachment-count">{attachments.length}</span>}<input type="file" multiple onChange={(event) => void handleAttachments(event)} /></label>
               <button className={`icon-button schedule-trigger ${scheduleOpen ? 'is-open' : ''}`} onClick={() => setScheduleOpen((open) => !open)} title="Choose send time" aria-label="Choose send time"><Clock3 size={20} /></button>
               <button className="send-button" type="submit" form="compose-form" disabled={scheduleBusy}>{scheduleBusy ? 'Scheduling…' : new Date(startTime).getTime() > Date.now() + 60_000 ? 'Send Later' : 'Send'}</button>
               {scheduleOpen && (
@@ -641,7 +687,7 @@ export default function App() {
               </div>
               <div className="editor-input" ref={editorRef} contentEditable role="textbox" aria-label="Email message" aria-multiline="true" data-placeholder="Type Your Reply..." onFocus={(event) => event.currentTarget.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'smooth' })} onInput={(event) => { setBody(event.currentTarget.innerHTML); syncFormattingState(); }} onPaste={(event) => { event.preventDefault(); const text = event.clipboardData.getData('text/plain'); document.execCommand('insertText', false, text); }} />
             </div>
-            {attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={`${file.name}-${index}`}>{file.name}<small>{(file.size / 1024).toFixed(0)} KB</small><button type="button" aria-label={`Remove ${file.name}`} onClick={() => { setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index)); notify('Attachment removed.'); }}><X size={13} /></button></span>)}</div>}
+            {attachments.length > 0 && <section className="compose-attachments" aria-label={`${attachments.length} attachments`}>{attachmentPreviews.map(({ file, url }, index) => <article className={`compose-attachment ${url ? 'compose-image' : ''}`} key={`${file.name}-${index}`}>{url ? <img src={url} alt={`Preview of ${file.name}`} /> : <span className="attachment-file-icon" aria-hidden="true">{file.type === 'application/pdf' ? 'PDF' : file.name.split('.').pop()?.slice(0, 4).toUpperCase() || 'FILE'}</span>}<div className="compose-attachment-meta"><strong title={file.name}>{file.name}</strong><small>{formatFileSize(file.size)}</small></div><button type="button" aria-label={`Remove ${file.name}`} onClick={() => { setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index)); notify('Attachment removed.'); }}><X size={14} /></button></article>)}</section>}
           </form>
           {notice && <div className="floating-notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss"><X size={14} /></button></div>}
         </main>
@@ -650,7 +696,7 @@ export default function App() {
           <header className="message-topbar">
             <button className="message-back" onClick={() => setSelectedEmail(null)} aria-label="Back to inbox"><ArrowLeft size={24} /></button>
             <h1>{selectedEmail.subject || '(no subject)'}<span className="message-id"><span aria-hidden="true"> | </span><strong>{selectedEmail.id}</strong></span></h1>
-            <div className="message-tools"><button disabled={actionBusy} className={selectedEmail.isStarred ? 'star-active' : ''} title={selectedEmail.isStarred ? 'Unstar' : 'Star'} aria-label={selectedEmail.isStarred ? 'Unstar email' : 'Star email'} onClick={() => void changeEmail(selectedEmail, 'star')}><Star size={20} fill={selectedEmail.isStarred ? 'currentColor' : 'none'} /></button><button disabled={actionBusy} title={selectedEmail.isArchived ? 'Unarchive' : 'Archive'} aria-label={selectedEmail.isArchived ? 'Unarchive email' : 'Archive email'} onClick={() => void changeEmail(selectedEmail, selectedEmail.isArchived ? 'unarchive' : 'archive')}><Archive size={19} /></button><button disabled={actionBusy} title="Delete" aria-label="Delete email" onClick={() => void changeEmail(selectedEmail, 'delete')}><Trash2 size={19} /></button><Avatar user={user} /></div>
+            <div className="message-tools"><button disabled={actionBusy} className={selectedEmail.isStarred ? 'star-active' : ''} title={selectedEmail.isStarred ? 'Unstar' : 'Star'} aria-label={selectedEmail.isStarred ? 'Unstar email' : 'Star email'} onClick={() => void changeEmail(selectedEmail, 'star')}><Star size={20} fill={selectedEmail.isStarred ? 'currentColor' : 'none'} /></button>{emailFilter === 'trash' ? <><button disabled={actionBusy} title="Restore" aria-label="Restore email" onClick={() => void changeEmail(selectedEmail, 'restore')}><RotateCcw size={18} /></button><button disabled={actionBusy} title="Delete permanently" aria-label="Delete permanently" onClick={() => void changeEmail(selectedEmail, 'permanent-delete')}><Trash2 size={19} /></button></> : <><button disabled={actionBusy} title={selectedEmail.isArchived ? 'Unarchive' : 'Archive'} aria-label={selectedEmail.isArchived ? 'Unarchive email' : 'Archive email'} onClick={() => void changeEmail(selectedEmail, selectedEmail.isArchived ? 'unarchive' : 'archive')}><Archive size={19} /></button><button disabled={actionBusy} title="Move to Trash" aria-label="Move to Trash" onClick={() => void changeEmail(selectedEmail, 'delete')}><Trash2 size={19} /></button></>}</div>
           </header>
           <article className="message-content">
             <div className="message-heading"><div className="sender-avatar">{(selectedEmail.sender?.displayName || selectedEmail.sender?.email || 'S').slice(0, 1).toUpperCase()}</div><div className="sender-lines"><strong>{selectedEmail.sender?.displayName || selectedEmail.sender?.email || 'Sender'}</strong><span>&lt;{selectedEmail.sender?.email || '—'}&gt;</span><small>to {selectedEmail.recipient}</small></div><time>{formatMessageDate(selectedEmail.sentAt || selectedEmail.scheduledAt)}</time></div>
@@ -669,22 +715,26 @@ export default function App() {
           <header className="inbox-toolbar">
             <label className="inbox-search"><Search size={17} /><input value={search} onChange={(event) => { setSearch(event.target.value); setResults(null); searchGenerationRef.current += 1; }} onKeyDown={(event) => event.key === 'Enter' && void find()} placeholder="Search" /><button type="button" className="search-submit" onClick={() => void find()} aria-label="Search"><Search size={15} /></button></label>
             <div className="toolbar-buttons">
-              <div className="filter-anchor"><button className={`toolbar-icon ${filterOpen ? 'selected' : ''}`} title="Filter messages" aria-label="Filter messages" aria-expanded={filterOpen} onClick={() => setFilterOpen((open) => !open)}><Filter size={17} /></button>{filterOpen && <div className="filter-menu" role="menu">{(['all', 'starred', 'archived'] as const).map((value) => <button role="menuitem" aria-pressed={emailFilter === value} key={value} onClick={() => { setEmailFilter(value); setFilterOpen(false); }}>{value[0].toUpperCase() + value.slice(1)}</button>)}</div>}</div>
-              <button className="toolbar-icon" title="Refresh" aria-label="Refresh inbox" onClick={() => { setResults(null); void load(); }}><RefreshCw size={17} /></button>
+              <select className="date-filter" aria-label="Filter by date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)}><option value="all">All dates</option><option value="today">Today</option>{emailFilter !== 'all' || tab === 'sent' ? <option value="yesterday">Yesterday</option> : null}<option value="7d">Last 7 days</option>{tab === 'sent' && <option value="30d">Last 30 days</option>}{tab === 'scheduled' && <><option value="tomorrow">Tomorrow</option><option value="24h">Next 24 hours</option><option value="week">This week</option></>}{tab === 'sent' && <><option value="1h">Last hour</option><option value="3h">Last 3 hours</option><option value="6h">Last 6 hours</option><option value="12h">Last 12 hours</option></>}</select>
+              <div className="filter-anchor"><button className={`toolbar-icon ${filterOpen ? 'selected' : ''}`} title="Filter messages" aria-label="Filter messages" aria-expanded={filterOpen} onClick={() => setFilterOpen((open) => !open)}><Filter size={17} /></button>{filterOpen && <div className="filter-menu" role="menu">{(['all', 'starred', 'archived', 'trash'] as const).map((value) => <button role="menuitem" aria-pressed={emailFilter === value} key={value} onClick={() => { setEmailFilter(value); setCurrentPage(1); setFilterOpen(false); }}>{value[0].toUpperCase() + value.slice(1)}</button>)}</div>}</div>
+              <button className="toolbar-icon" title="Refresh" aria-label="Refresh inbox" onClick={() => { setResults(null); void loadEmails(currentPage); }}><RefreshCw size={17} /></button>
             </div>
           </header>
           {notice && <div className="inbox-notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss"><X size={14} /></button></div>}
-          {error && <div className="inbox-error" role="alert">{error}<button onClick={() => void load()}>Retry</button></div>}
-          <section className="email-list" aria-label={tab === 'scheduled' ? 'Scheduled emails' : 'Sent emails'}>
+          {error && <div className="inbox-error" role="alert">{error}<button onClick={() => void loadEmails(currentPage)}>Retry</button></div>}
+          <div className="list-controls"><label className="select-page"><input type="checkbox" aria-label="Select all emails on this page" checked={visibleEmails.length > 0 && selectedIds.length === visibleEmails.length} onChange={(event) => setSelectedIds(event.target.checked ? visibleEmails.map((email) => email.id) : [])} />Select page</label>{selectedIds.length > 0 && <div className="bulk-toolbar"><strong>{selectedIds.length} selected</strong>{emailFilter === 'trash' ? <><button onClick={() => void bulkAction('restore')}><RotateCcw size={15} />Restore</button><button className="danger-action" onClick={() => void bulkAction('permanent-delete')}><Trash2 size={15} />Delete permanently</button></> : <><button onClick={() => void bulkAction(emailFilter === 'archived' ? 'unarchive' : 'archive')}><Archive size={15} />{emailFilter === 'archived' ? 'Unarchive' : 'Archive'}</button><button onClick={() => void bulkAction(selectedIds.every((id) => emails.find((email) => email.id === id)?.isStarred) ? 'unstar' : 'star')}><Star size={15} />{selectedIds.every((id) => emails.find((email) => email.id === id)?.isStarred) ? 'Unstar' : 'Star'}</button><button onClick={() => void bulkAction('trash')}><Trash2 size={15} />Trash</button></>}{actionBusy && <LoaderCircle className="spin" size={15} />}</div>}</div>
+          <section className="email-list" aria-label={emailFilter === 'trash' ? 'Trashed emails' : emailFilter === 'archived' ? 'Archived emails' : emailFilter === 'starred' ? 'Starred emails' : tab === 'scheduled' ? 'Scheduled emails' : 'Sent emails'}>
             {visibleEmails.map((email) => (
-              <div className="email-row" key={email.id} role="button" tabIndex={0} onClick={() => setSelectedEmail(email)} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setSelectedEmail(email); } }}>
+              <article className="email-row" key={email.id} tabIndex={0} aria-label={`Open email to ${email.recipient}: ${email.subject || 'no subject'}`} onClick={() => setSelectedEmail(email)} onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); setSelectedEmail(email); } }}>
+                <input className="row-checkbox" type="checkbox" checked={selectedIds.includes(email.id)} aria-label={`Select ${email.subject || email.recipient}`} onClick={(event) => event.stopPropagation()} onChange={(event) => setSelectedIds((ids) => event.target.checked ? [...ids, email.id] : ids.filter((id) => id !== email.id))} />
                 <span className="email-recipient">To: {email.recipient}</span>
                 {email.status === 'scheduled' || email.status === 'processing' ? <span className="scheduled-badge"><Clock3 size={13} />{formatScheduled(email.scheduledAt)}</span> : <span className={`sent-badge ${email.status === 'failed' ? 'failed' : ''}`}>{email.status === 'failed' ? 'Failed' : 'Sent'}</span>}
                 <span className="email-summary"><strong>{email.subject || '(no subject)'}</strong><span> - {email.body?.replace(/\s+/g, ' ').trim()}</span></span>
-                <button type="button" className={`row-star ${email.isStarred ? 'active' : ''}`} title={email.isStarred ? 'Unstar' : 'Star'} aria-label={email.isStarred ? 'Unstar email' : 'Star email'} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void changeEmail(email, 'star'); }}><Star size={18} fill={email.isStarred ? 'currentColor' : 'none'} /></button>
-              </div>
+                {emailFilter === 'trash' ? <span className="trash-row-actions"><button type="button" title="Restore" aria-label="Restore email" onClick={(event) => { event.stopPropagation(); void changeEmail(email, 'restore'); }}><RotateCcw size={15} /></button><button type="button" title="Delete permanently" aria-label="Delete permanently" onClick={(event) => { event.stopPropagation(); void changeEmail(email, 'permanent-delete'); }}><Trash2 size={15} /></button></span> : <button type="button" className={`row-star ${email.isStarred ? 'active' : ''}`} title={email.isStarred ? 'Unstar' : 'Star'} aria-label={email.isStarred ? 'Unstar email' : 'Star email'} onClick={(event) => { event.preventDefault(); event.stopPropagation(); void changeEmail(email, 'star'); }}><Star size={18} fill={email.isStarred ? 'currentColor' : 'none'} /></button>}
+              </article>
             ))}
-            {!visibleEmails.length && <div className="inbox-empty">{results ? 'No matching emails.' : emailFilter === 'starred' ? 'No starred emails yet.' : emailFilter === 'archived' ? 'No archived emails yet.' : `No ${tab} emails yet.`}</div>}
+            {!visibleEmails.length && <div className="inbox-empty">{search.trim() ? 'No matching emails.' : emailFilter === 'starred' ? 'No starred emails yet.' : emailFilter === 'archived' ? 'No archived emails yet.' : emailFilter === 'trash' ? 'Trash is empty.' : `No ${tab} emails yet.`}</div>}
+            <nav className="pagination" aria-label="Email pages"><span>Showing {pageInfo.totalCount ? `${(pageInfo.currentPage - 1) * pageInfo.pageSize + 1}–${Math.min(pageInfo.currentPage * pageInfo.pageSize, pageInfo.totalCount)}` : '0'} of {pageInfo.totalCount}</span><div><button disabled={!pageInfo.hasPreviousPage || loading} onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}><ChevronLeft size={16} />Previous</button>{Array.from({ length: Math.min(pageInfo.totalPages, 5) }, (_, index) => { const first = Math.max(1, Math.min(currentPage - 2, pageInfo.totalPages - 4)); const page = first + index; return <button key={page} className={page === currentPage ? 'page-active' : ''} aria-current={page === currentPage ? 'page' : undefined} onClick={() => setCurrentPage(page)}>{page}</button>; })}<button disabled={!pageInfo.hasNextPage || loading} onClick={() => setCurrentPage((page) => page + 1)}>Next<ChevronRight size={16} /></button></div></nav>
           </section>
         </main>
       )}

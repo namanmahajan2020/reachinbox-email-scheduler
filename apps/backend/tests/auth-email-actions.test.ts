@@ -50,9 +50,24 @@ describe('local password sessions and persisted email actions', () => {
     expect((await prisma.email.findUniqueOrThrow({ where: { id: scheduled.id } })).isStarred).toBe(true);
     expect((await guest.patch(`/api/emails/${scheduled.id}/star`).send({ starred: false })).status).toBe(200);
     expect((await guest.patch(`/api/emails/${scheduled.id}/archive`).send()).status).toBe(204);
-    expect((await guest.get('/api/emails')).body.some((row: { id: string }) => row.id === scheduled.id)).toBe(false);
-    expect((await prisma.email.findUniqueOrThrow({ where: { id: scheduled.id } })).isArchived).toBe(true);
+    const paged = await guest.get('/api/emails').query({ view: 'archived', page: 1, limit: 50 });
+    expect(paged.body.emails).toBeInstanceOf(Array);
+    expect(paged.body.pageSize).toBe(50);
+    expect(paged.body.totalCount).toBe(1);
+    expect(paged.body.emails[0].id).toBe(scheduled.id);
+    expect((await guest.patch('/api/emails/bulk').send({ ids: [scheduled.id], action: 'star' })).body.count).toBe(1);
+    expect((await prisma.email.findUniqueOrThrow({ where: { id: scheduled.id } })).isStarred).toBe(true);
+    expect((await guest.patch('/api/emails/bulk').send({ ids: [scheduled.id], action: 'unstar' })).body.count).toBe(1);
+    expect((await guest.patch('/api/emails/bulk').send({ ids: [scheduled.id], action: 'unarchive' })).body.count).toBe(1);
+    expect((await prisma.email.findUniqueOrThrow({ where: { id: scheduled.id } })).isArchived).toBe(false);
     expect((await guest.delete(`/api/emails/${removable.id}`)).status).toBe(204);
+    expect((await prisma.email.findUniqueOrThrow({ where: { id: removable.id } })).deletedAt).toBeInstanceOf(Date);
+    const trash = await guest.get('/api/emails').query({ view: 'trash', page: 1, limit: 50 });
+    expect(trash.body.emails.map((row: { id: string }) => row.id)).toContain(removable.id);
+    expect((await guest.patch(`/api/emails/${removable.id}/restore`).send()).status).toBe(204);
+    expect((await prisma.email.findUniqueOrThrow({ where: { id: removable.id } })).deletedAt).toBeNull();
+    expect((await guest.patch('/api/emails/bulk').send({ ids: [removable.id], action: 'trash' })).body.count).toBe(1);
+    expect((await guest.patch('/api/emails/bulk').send({ ids: [removable.id], action: 'permanent-delete' })).body.count).toBe(1);
     expect(await prisma.email.findUnique({ where: { id: removable.id } })).toBeNull();
 
     expect((await guest.post('/api/auth/logout')).status).toBe(204);
