@@ -130,6 +130,7 @@ The API is served under `/api` on port `4000` by default. Protected routes requi
 | `GET`, `POST` | `/api/senders` | List or add/update a sender |
 | `POST` | `/api/campaigns` | Create a campaign and enqueue its emails |
 | `GET` | `/api/emails` | List emails; accepts `view`, `page`, `limit` (max 50), status, `dateFrom`, and `dateTo`; page/limit returns pagination metadata |
+| `GET` | `/api/emails/counts` | Return authenticated-user counts for Scheduled, Sent, Starred, Archived, and Trash |
 | `PATCH` | `/api/emails/:id/star` | Persist star state |
 | `PATCH` | `/api/emails/:id/archive` | Archive or unarchive an email |
 | `PATCH` | `/api/emails/:id/trash` | Move an email to Trash |

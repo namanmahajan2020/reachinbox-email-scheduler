@@ -11,6 +11,8 @@ import {
   Italic,
   LoaderCircle,
   LogOut,
+  Paperclip,
+  FileText,
   RefreshCw,
   Search,
   Send,
@@ -45,6 +47,8 @@ type Email = {
 type User = { name: string; email: string; avatarUrl?: string | null; hasPassword?: boolean };
 type Sender = { id: string; email: string; displayName: string };
 type Tab = 'scheduled' | 'sent';
+type Folder = Tab | 'starred' | 'archived' | 'trash';
+type EmailCounts = Record<Folder, number>;
 type PageInfo = { currentPage: number; pageSize: number; totalCount: number; totalPages: number; hasNextPage: boolean; hasPreviousPage: boolean };
 const FORMAT_COMMANDS = ['bold', 'italic', 'underline', 'strikeThrough', 'insertOrderedList', 'insertUnorderedList', 'justifyLeft', 'justifyCenter', 'justifyRight'] as const;
 
@@ -137,17 +141,19 @@ function GoogleMark() {
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [emails, setEmails] = useState<Email[]>([]);
-  const [tab, setTab] = useState<Tab>('scheduled');
+  const [activeFolder, setActiveFolder] = useState<Folder>('scheduled');
+  const tab: Tab = activeFolder === 'sent' ? 'sent' : 'scheduled';
+  const emailFilter: 'all' | 'starred' | 'archived' | 'trash' = activeFolder === 'scheduled' || activeFolder === 'sent' ? 'all' : activeFolder;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [search, setSearch] = useState('');
   const [results, setResults] = useState<Email[] | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
-  const [emailFilter, setEmailFilter] = useState<'all' | 'starred' | 'archived' | 'trash'>('all');
   const [currentPage, setCurrentPage] = useState(1);
   const [pageInfo, setPageInfo] = useState<PageInfo>({ currentPage: 1, pageSize: 50, totalCount: 0, totalPages: 0, hasNextPage: false, hasPreviousPage: false });
   const [dateFilter, setDateFilter] = useState('all');
+  const [counts, setCounts] = useState<EmailCounts>({ scheduled: 0, sent: 0, starred: 0, archived: 0, trash: 0 });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [composeOpen, setComposeOpen] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
@@ -179,9 +185,23 @@ export default function App() {
   const editorRef = useRef<HTMLDivElement>(null);
   const pollingRef = useRef(false);
   const searchGenerationRef = useRef(0);
+  const listGenerationRef = useRef(0);
+  const countsGenerationRef = useRef(0);
   const pollFailedRef = useRef(false);
 
   function notify(message: string) { setToast(message); }
+
+  function navigate(folder: Folder) {
+    listGenerationRef.current += 1;
+    setActiveFolder(folder);
+    setCurrentPage(1);
+    setDateFilter('all');
+    setSearch('');
+    setResults(null);
+    setSelectedIds([]);
+    setProfileOpen(false);
+    setFilterOpen(false);
+  }
 
   function syncFormattingState() {
     const editor = editorRef.current;
@@ -211,7 +231,16 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
+  async function refreshCounts() {
+    const generation = ++countsGenerationRef.current;
+    try {
+      const next = await request<EmailCounts>('/emails/counts');
+      if (generation === countsGenerationRef.current) setCounts(next);
+    } catch { /* Keep the last known counts if the summary endpoint is briefly unavailable. */ }
+  }
+
   async function loadEmails(page = currentPage) {
+    const generation = ++listGenerationRef.current;
     setLoading(true);
     setError('');
     const view = emailFilter === 'all' ? tab : emailFilter;
@@ -223,12 +252,13 @@ export default function App() {
     try {
       const path = search.trim() ? `/search?${params}` : `/emails?${params}`;
       const response = await request<{ emails: Email[] } & PageInfo>(path);
+      if (generation !== listGenerationRef.current) return;
       setEmails(response.emails);
       setPageInfo(response);
       setCurrentPage(response.currentPage);
       setSelectedIds([]);
-    } catch (cause) { const message = cause instanceof Error ? cause.message : 'Could not load emails'; if (message === 'Authentication required') setUser(null); else setError(message); }
-    finally { setLoading(false); }
+    } catch (cause) { if (generation === listGenerationRef.current) { const message = cause instanceof Error ? cause.message : 'Could not load emails'; if (message === 'Authentication required') setUser(null); else setError(message); } }
+    finally { if (generation === listGenerationRef.current) setLoading(false); }
   }
 
   async function load() {
@@ -250,6 +280,7 @@ export default function App() {
       setPageInfo(currentEmails);
       setSenders(currentSenders);
       setSenderId((current) => current || currentSenders[0]?.id || '');
+      void refreshCounts();
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : 'Could not load your inbox';
       if (message !== 'Authentication required') setError(message);
@@ -265,7 +296,7 @@ export default function App() {
 
   useEffect(() => {
     if (user) void loadEmails(currentPage);
-  }, [user, currentPage, tab, emailFilter, dateFilter, search]);
+  }, [user, currentPage, activeFolder, dateFilter, search]);
 
   useEffect(() => {
     if (!user || composeOpen || selectedEmail || search.trim()) return;
@@ -273,6 +304,7 @@ export default function App() {
     const timer = window.setInterval(async () => {
       if (pollingRef.current) return;
       pollingRef.current = true;
+      const generation = ++listGenerationRef.current;
       try {
         const view = emailFilter === 'all' ? tab : emailFilter;
         const query = new URLSearchParams({ view, page: String(currentPage), limit: '50' });
@@ -281,7 +313,8 @@ export default function App() {
         if (dateRange.from) query.set('dateFrom', dateRange.from);
         if (dateRange.to) query.set('dateTo', dateRange.to);
         const latest = await request<{ emails: Email[] } & PageInfo>(`${search.trim() ? '/search' : '/emails'}?${query}`);
-        if (active) { setEmails(latest.emails); setPageInfo(latest); }
+        if (active && generation === listGenerationRef.current) { setEmails(latest.emails); setPageInfo(latest); }
+        if (active) void refreshCounts();
         pollFailedRef.current = false;
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : '';
@@ -291,7 +324,7 @@ export default function App() {
       finally { pollingRef.current = false; }
     }, 3000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [user, composeOpen, selectedEmail, search, currentPage, tab, emailFilter, dateFilter]);
+  }, [user, composeOpen, selectedEmail, search, currentPage, activeFolder, dateFilter]);
 
   useEffect(() => {
     if (!profileOpen && !filterOpen && !scheduleOpen && !senderOpen && !passwordOpen) return;
@@ -387,6 +420,7 @@ export default function App() {
         setEmails((current) => current.filter((item) => item.id !== email.id)); setSelectedEmail(null); notify('Email permanently deleted.');
       }
       void loadEmails(currentPage);
+      void refreshCounts();
     } catch (cause) { notify(cause instanceof Error ? cause.message : 'Email action failed.'); }
     finally { setActionBusy(false); }
   }
@@ -403,6 +437,7 @@ export default function App() {
       setSelectedIds([]);
       notify(action === 'trash' ? 'Emails moved to Trash.' : action === 'restore' ? 'Emails restored.' : action === 'permanent-delete' ? 'Emails permanently deleted.' : 'Bulk action complete.');
       void loadEmails(currentPage);
+      void refreshCounts();
     } catch (cause) { notify(cause instanceof Error ? cause.message : 'Bulk action failed.'); }
     finally { setActionBusy(false); }
   }
@@ -427,8 +462,8 @@ export default function App() {
   }
 
   const visibleEmails = emails;
-  const scheduledCount = tab === 'scheduled' ? pageInfo.totalCount : undefined;
-  const sentCount = tab === 'sent' ? pageInfo.totalCount : undefined;
+  const scheduledCount = counts.scheduled;
+  const sentCount = counts.sent;
 
   async function find() {
     const query = search.trim();
@@ -462,6 +497,7 @@ export default function App() {
   function closeCompose() {
     setComposeOpen(false);
     setScheduleOpen(false);
+    setAttachments([]);
   }
 
   function addDraftRecipients() {
@@ -528,7 +564,8 @@ export default function App() {
         }),
       });
       setEmails((current) => [...new Map([...created.emails, ...current].map((email) => [email.id, email])).values()]);
-      setTab('scheduled');
+      navigate('scheduled');
+      void refreshCounts();
       setResults(null);
       closeCompose();
       setNotice(created.queuePending
@@ -611,25 +648,23 @@ export default function App() {
             <span className="account-copy"><strong>{user.name}</strong><small>{user.email}</small></span>
             <ChevronDown size={16} />
           </button>
-          {profileOpen && (
-            <div className="account-menu">
+          <div className={`account-menu ${profileOpen ? 'is-open' : ''}`} aria-hidden={!profileOpen}>
               {!user.hasPassword && <button className="set-password-action" onClick={() => { setProfileOpen(false); setPasswordOpen(true); }}>Set email password</button>}
               <button onClick={() => void signOut()}><LogOut size={14} />Sign out</button>
-            </div>
-          )}
+          </div>
           <button className="compose-sidebar-button" onClick={openCompose}>Compose</button>
           <nav className="mail-nav" aria-label="Email folders">
             <div className="mail-nav-label">CORE</div>
-            <button className={`mail-nav-item ${tab === 'scheduled' ? 'active' : ''}`} onClick={() => { setTab('scheduled'); setEmailFilter('all'); setSearch(''); setResults(null); setProfileOpen(false); setFilterOpen(false); }}>
+            <button className={`mail-nav-item ${activeFolder === 'scheduled' ? 'active' : ''}`} aria-current={activeFolder === 'scheduled' ? 'page' : undefined} onClick={() => navigate('scheduled')}>
               <Clock3 size={17} /><span>Scheduled</span><small>{scheduledCount}</small>
             </button>
-            <button className={`mail-nav-item ${tab === 'sent' ? 'active' : ''}`} onClick={() => { setTab('sent'); setEmailFilter('all'); setSearch(''); setResults(null); setProfileOpen(false); setFilterOpen(false); }}>
+            <button className={`mail-nav-item ${activeFolder === 'sent' ? 'active' : ''}`} aria-current={activeFolder === 'sent' ? 'page' : undefined} onClick={() => navigate('sent')}>
               <Send size={17} /><span>Sent</span><small>{sentCount}</small>
             </button>
             <div className="mail-nav-label">FOLDERS</div>
-            <button className={`mail-nav-item ${emailFilter === 'starred' ? 'active' : ''}`} onClick={() => { setEmailFilter('starred'); setSearch(''); setProfileOpen(false); }}><Star size={17} /><span>Starred</span></button>
-            <button className={`mail-nav-item ${emailFilter === 'archived' ? 'active' : ''}`} onClick={() => { setEmailFilter('archived'); setSearch(''); setProfileOpen(false); }}><Archive size={17} /><span>Archived</span></button>
-            <button className={`mail-nav-item ${emailFilter === 'trash' ? 'active' : ''}`} onClick={() => { setEmailFilter('trash'); setSearch(''); setProfileOpen(false); }}><Trash2 size={17} /><span>Trash</span></button>
+            <button className={`mail-nav-item ${activeFolder === 'starred' ? 'active' : ''}`} aria-current={activeFolder === 'starred' ? 'page' : undefined} onClick={() => navigate('starred')}><Star size={17} /><span>Starred</span><small>{counts.starred}</small></button>
+            <button className={`mail-nav-item ${activeFolder === 'archived' ? 'active' : ''}`} aria-current={activeFolder === 'archived' ? 'page' : undefined} onClick={() => navigate('archived')}><Archive size={17} /><span>Archived</span><small>{counts.archived}</small></button>
+            <button className={`mail-nav-item ${activeFolder === 'trash' ? 'active' : ''}`} aria-current={activeFolder === 'trash' ? 'page' : undefined} onClick={() => navigate('trash')}><Trash2 size={17} /><span>Trash</span><small>{counts.trash}</small></button>
           </nav>
         </aside>
       )}
@@ -639,7 +674,7 @@ export default function App() {
           <header className="compose-topbar">
             <button className="compose-back" onClick={closeCompose} aria-label="Back to inbox"><ArrowLeft size={23} /><span>Compose New Email</span></button>
             <div className="compose-actions">
-              <label className="icon-button attachment-trigger compose-upload" title={`Attach files${attachments.length ? ` (${attachments.length})` : ''}`} aria-label={`Attach files${attachments.length ? `, ${attachments.length} selected` : ''}`}><Upload size={19} />{attachments.length > 0 && <span className="attachment-count">{attachments.length}</span>}<input type="file" multiple onChange={(event) => void handleAttachments(event)} /></label>
+              <label className="icon-button attachment-trigger compose-upload" title={`Attach files${attachments.length ? ` (${attachments.length})` : ''}`} aria-label={`Attach files${attachments.length ? `, ${attachments.length} selected` : ''}`}><Paperclip size={19} />{attachments.length > 0 && <span className="attachment-count">{attachments.length}</span>}<input type="file" multiple onChange={(event) => void handleAttachments(event)} /></label>
               <button className={`icon-button schedule-trigger ${scheduleOpen ? 'is-open' : ''}`} onClick={() => setScheduleOpen((open) => !open)} title="Choose send time" aria-label="Choose send time"><Clock3 size={20} /></button>
               <button className="send-button" type="submit" form="compose-form" disabled={scheduleBusy}>{scheduleBusy ? 'Scheduling…' : new Date(startTime).getTime() > Date.now() + 60_000 ? 'Send Later' : 'Send'}</button>
               {scheduleOpen && (
@@ -687,7 +722,7 @@ export default function App() {
               </div>
               <div className="editor-input" ref={editorRef} contentEditable role="textbox" aria-label="Email message" aria-multiline="true" data-placeholder="Type Your Reply..." onFocus={(event) => event.currentTarget.scrollIntoView({ block: 'end', inline: 'nearest', behavior: 'smooth' })} onInput={(event) => { setBody(event.currentTarget.innerHTML); syncFormattingState(); }} onPaste={(event) => { event.preventDefault(); const text = event.clipboardData.getData('text/plain'); document.execCommand('insertText', false, text); }} />
             </div>
-            {attachments.length > 0 && <section className="compose-attachments" aria-label={`${attachments.length} attachments`}>{attachmentPreviews.map(({ file, url }, index) => <article className={`compose-attachment ${url ? 'compose-image' : ''}`} key={`${file.name}-${index}`}>{url ? <img src={url} alt={`Preview of ${file.name}`} /> : <span className="attachment-file-icon" aria-hidden="true">{file.type === 'application/pdf' ? 'PDF' : file.name.split('.').pop()?.slice(0, 4).toUpperCase() || 'FILE'}</span>}<div className="compose-attachment-meta"><strong title={file.name}>{file.name}</strong><small>{formatFileSize(file.size)}</small></div><button type="button" aria-label={`Remove ${file.name}`} onClick={() => { setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index)); notify('Attachment removed.'); }}><X size={14} /></button></article>)}</section>}
+            {attachments.length > 0 && <section className="compose-attachments" aria-label={`${attachments.length} attachments`}>{attachmentPreviews.map(({ file, url }, index) => <ComposeAttachmentCard key={`${file.name}-${index}`} file={file} url={url} onRemove={() => { setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index)); notify('Attachment removed.'); }} />)}</section>}
           </form>
           {notice && <div className="floating-notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss"><X size={14} /></button></div>}
         </main>
@@ -716,7 +751,7 @@ export default function App() {
             <label className="inbox-search"><Search size={17} /><input value={search} onChange={(event) => { setSearch(event.target.value); setResults(null); searchGenerationRef.current += 1; }} onKeyDown={(event) => event.key === 'Enter' && void find()} placeholder="Search" /><button type="button" className="search-submit" onClick={() => void find()} aria-label="Search"><Search size={15} /></button></label>
             <div className="toolbar-buttons">
               <select className="date-filter" aria-label="Filter by date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)}><option value="all">All dates</option><option value="today">Today</option>{emailFilter !== 'all' || tab === 'sent' ? <option value="yesterday">Yesterday</option> : null}<option value="7d">Last 7 days</option>{tab === 'sent' && <option value="30d">Last 30 days</option>}{tab === 'scheduled' && <><option value="tomorrow">Tomorrow</option><option value="24h">Next 24 hours</option><option value="week">This week</option></>}{tab === 'sent' && <><option value="1h">Last hour</option><option value="3h">Last 3 hours</option><option value="6h">Last 6 hours</option><option value="12h">Last 12 hours</option></>}</select>
-              <div className="filter-anchor"><button className={`toolbar-icon ${filterOpen ? 'selected' : ''}`} title="Filter messages" aria-label="Filter messages" aria-expanded={filterOpen} onClick={() => setFilterOpen((open) => !open)}><Filter size={17} /></button>{filterOpen && <div className="filter-menu" role="menu">{(['all', 'starred', 'archived', 'trash'] as const).map((value) => <button role="menuitem" aria-pressed={emailFilter === value} key={value} onClick={() => { setEmailFilter(value); setCurrentPage(1); setFilterOpen(false); }}>{value[0].toUpperCase() + value.slice(1)}</button>)}</div>}</div>
+              <div className="filter-anchor"><button className={`toolbar-icon ${filterOpen ? 'selected' : ''}`} title="Filter messages" aria-label="Filter messages" aria-expanded={filterOpen} onClick={() => setFilterOpen((open) => !open)}><Filter size={17} /></button>{filterOpen && <div className="filter-menu" role="menu">{(['all', 'starred', 'archived', 'trash'] as const).map((value) => <button role="menuitem" aria-pressed={emailFilter === value} key={value} onClick={() => { navigate(value === 'all' ? tab : value); }}>{value[0].toUpperCase() + value.slice(1)}</button>)}</div>}</div>
               <button className="toolbar-icon" title="Refresh" aria-label="Refresh inbox" onClick={() => { setResults(null); void loadEmails(currentPage); }}><RefreshCw size={17} /></button>
             </div>
           </header>
@@ -760,4 +795,25 @@ function Avatar({ user }: { user: User }) {
   return user.avatarUrl && !failed
     ? <img className="account-avatar" src={user.avatarUrl} alt="" onError={() => setFailed(true)} />
     : <span className="account-avatar avatar-fallback" aria-hidden="true">{user.name.slice(0, 1).toUpperCase()}</span>;
+}
+
+function ComposeAttachmentCard({ file, url, onRemove }: { file: File; url: string; onRemove: () => void }) {
+  const extension = file.name.split('.').pop()?.toLowerCase() ?? 'file';
+  const textTypes = ['md', 'txt', 'json', 'csv', 'js', 'ts', 'tsx', 'jsx', 'css', 'html', 'py', 'java', 'cpp', 'c'];
+  const showText = textTypes.includes(extension) || file.type.startsWith('text/');
+  const [snippet, setSnippet] = useState('');
+
+  useEffect(() => {
+    let current = true;
+    if (showText) void file.slice(0, 4096).text().then((text) => { if (current) setSnippet(text.replace(/\s+/g, ' ').trim().slice(0, 180)); }).catch(() => { if (current) setSnippet('Text preview unavailable'); });
+    return () => { current = false; };
+  }, [file, showText]);
+
+  return (
+    <article className={`compose-attachment ${url ? 'compose-image' : showText ? 'compose-text' : 'compose-document'}`}>
+      {url ? <img src={url} alt={`Preview of ${file.name}`} /> : showText ? <div className="attachment-visual text-visual"><strong>{extension.toUpperCase()}</strong><code>{snippet || 'Loading text preview…'}</code></div> : <div className="attachment-visual document-visual"><FileText size={30} /><strong>{extension === 'pdf' ? 'PDF document' : extension.toUpperCase()}</strong><small>{extension === 'pdf' ? 'Document preview' : 'Preview unavailable'}</small></div>}
+      <div className="compose-attachment-meta"><strong title={file.name}>{file.name}</strong><small>{formatFileSize(file.size)}</small></div>
+      <button type="button" aria-label={`Remove ${file.name}`} onClick={onRemove}><X size={14} /></button>
+    </article>
+  );
 }
